@@ -75,9 +75,15 @@
     });
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'hidden') return;
-    capture('session_pause', { seconds: Math.round((Date.now() - t0) / 1000), ads_shown: stats.ads_shown, ads_granted: stats.ads_granted });
+  // Пауза сессии: visibilitychange, pagehide или Telegram deactivated — что сработает первым (один раз на паузу).
+  let paused = false;
+  function pause(why) {
+    if (paused) return; paused = true;
+    capture('session_pause', { seconds: Math.round((Date.now() - t0) / 1000), ads_shown: stats.ads_shown, ads_granted: stats.ads_granted, via: why });
     ready.then(() => flush(true));
-  });
+  }
+  const resume = () => { paused = false; };
+  document.addEventListener('visibilitychange', () => (document.visibilityState === 'hidden' ? pause('hidden') : resume()));
+  window.addEventListener('pagehide', () => pause('pagehide'));
+  try { tg && tg.onEvent('deactivated', () => pause('deactivated')); tg && tg.onEvent('activated', resume); } catch (e) {}
 })();
