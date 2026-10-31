@@ -9,7 +9,7 @@
 
 // ---- Настройки AdsGram ----------------------------------------------------
 // blockId блока типа Reward из partner.adsgram.ai (строка, например "1234").
-const ADSGRAM_BLOCK_ID = window.NL2_ADSGRAM_BLOCK_ID || '';
+const ADSGRAM_BLOCK_ID = window.NL2_ADSGRAM_BLOCK_ID || '57145';   // площадка New Life 2 (PlatformID 54129), блок Rewarded main
 // true = AdsGram отдаёт тестовую рекламу (статистика и Reward URL не пишутся).
 // Перед релизом обязательно false.
 // window.NL2_ADSGRAM_* можно задать до загрузки игры (для тестов).
