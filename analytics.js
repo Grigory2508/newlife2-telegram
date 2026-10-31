@@ -54,7 +54,7 @@
       if (!flushTimer) flushTimer = setTimeout(() => flush(false), 3000);
     });
   }
-  window.NL2Analytics = { capture, stats, enabled };
+  window.NL2Analytics = { capture, stats, enabled, flush: () => ready.then(() => flush(true)) };
   if (!enabled) return;
 
   const firstOpen = !lsGet('nl2_seen');

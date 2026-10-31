@@ -16,7 +16,7 @@
   const PROJECT_ID = '4bild1ewg3i';
   const DBS = ['c3-localstorage-' + PROJECT_ID, 'c3-savegames-' + PROJECT_ID];
   const STORE = 'keyvaluepairs';
-  const CHUNK = 4000, MAX_CHUNKS = 450, PARALLEL = 8, DEBOUNCE_MS = 8000;
+  const CHUNK = 4000, MAX_CHUNKS = 450, DEBOUNCE_MS = 8000;
   const LS_SYNC = 'nl2_sync_ts', LS_DIRTY = 'nl2_dirty_ts', LS_HASH = 'nl2_sync_hash', LS_GEN = 'nl2_sync_gen';
 
   const tg = window.Telegram && window.Telegram.WebApp;
@@ -26,6 +26,8 @@
   const log = (...a) => console.log('[NL2Cloud]', ...a);
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, String(v)); } catch (e) {} };
+  // Диагностика синхронизации в аналитику (analytics.js подключается после этого файла — берём лениво).
+  const diag = (ev, props) => { try { window.NL2Analytics && window.NL2Analytics.capture(ev, props); } catch (e) {} };
 
   // Снимок до старта игры: по нему решаем, чья копия новее.
   const startSync = +lsGet(LS_SYNC) || 0;
@@ -145,6 +147,7 @@
     if (restoring) return;
     if (pushing) { again = true; return; }
     pushing = true;
+    const t0 = Date.now(); let stage = 'dump';
     try {
       const dirtyAtDump = +lsGet(LS_DIRTY) || Date.now();   // записи после этого момента останутся «невыгруженными»
       const data = { ls: await dumpDb(DBS[0]), sg: await dumpDb(DBS[1]) };
@@ -161,19 +164,19 @@
       if (cloudGen > myGen) log('cloud changed on another device since last sync — overwriting (last writer wins)', cloudGen, myGen);
       const gen = Math.max(cloudGen, myGen) + 1, slot = cloudSlot === 'a' ? 'b' : 'a';
       const n = Math.ceil(s.length / CHUNK), ts = Date.now();
-      for (let i = 0; i < n; i += PARALLEL) {
-        const batch = [];
-        for (let j = i; j < Math.min(n, i + PARALLEL); j++) batch.push(cset('nl2_' + slot + j, s.slice(j * CHUNK, (j + 1) * CHUNK)));
-        await Promise.all(batch);
-      }
+      const tUp = Date.now(); stage = 'chunks';
+      for (let j = 0; j < n; j++) await cset('nl2_' + slot + j, s.slice(j * CHUNK, (j + 1) * CHUNK));   // по очереди: параллельные запросы Telegram может отклонять
+      stage = 'meta';
       await cset('nl2_meta', JSON.stringify({ v: 1, gen, slot, ts, n, enc, len: s.length }));
       // лишние части этой ячейки от прошлых выгрузок и части первой версии (nl2_c*)
       const stale = (await ckeys()).filter((k) => { const m = /^nl2_([abc])(\d+)$/.exec(k); return m && (m[1] === 'c' || (m[1] === slot && +m[2] >= n)); });
       await cdel(stale);
       lsSet(LS_SYNC, dirtyAtDump); lsSet(LS_HASH, h); lsSet(LS_GEN, gen);
       log('pushed', reason, 'gen', gen, n, 'chunks', s.length, 'chars');
+      diag('cloud_push', { reason, gen, cloud_gen_before: cloudGen, my_gen_before: myGen, chunks: n, ms: Date.now() - t0, upload_ms: Date.now() - tUp });
     } catch (e) {
       console.warn('[NL2Cloud] push failed', e);
+      diag('cloud_push_failed', { reason, stage, error: String((e && e.message) || e).slice(0, 200), ms: Date.now() - t0 });
     } finally {
       pushing = false;
       if (again) { again = false; setTimeout(() => push('again'), 0); }   // изменения пришли во время выгрузки — догружаем сразу
@@ -214,9 +217,13 @@
     checking = (async () => {
       try {
         const raw = await cget('nl2_meta');
-        if (!raw) { log('no cloud copy yet'); return; }
+        if (!raw) { log('no cloud copy yet'); diag('cloud_check', { reason, result: 'empty' }); return; }
         const meta = JSON.parse(raw);
-        if (!(await decide(meta, atStart))) { if (atStart) log('local copy is current'); return; }
+        const take = await decide(meta, atStart);
+        diag('cloud_check', { reason, result: take ? 'restore' : 'keep_local', cloud_gen: meta.gen || 0, cloud_slot: meta.slot || 'c', my_gen: +lsGet(LS_GEN) || 0,
+          cloud_age_s: Math.round((Date.now() - meta.ts) / 1000), local_sync_age_s: Math.round((Date.now() - (atStart ? startSync : +lsGet(LS_SYNC) || 0)) / 1000),
+          local_dirty_age_s: Math.round((Date.now() - (atStart ? startDirty : +lsGet(LS_DIRTY) || 0)) / 1000) });
+        if (!take) { if (atStart) log('local copy is current'); return; }
         const { data } = await readCloud();
         restoring = true; window.__nl2Restoring = true; clearTimeout(timer); timer = null;
         await loadDb(DBS[0], data.ls || {});
@@ -225,10 +232,12 @@
         log('restored from cloud', reason, 'gen', meta.gen, new Date(meta.ts).toISOString());
         window.NL2Analytics && window.NL2Analytics.capture('cloud_restore', { reason, cloud_gen: meta.gen || 0, cloud_ts: meta.ts });
         // Игра уже прочитала старые данные — перезапускаем страницу, чтобы она взяла восстановленные.
-        setTimeout(() => location.reload(), 300);
+        try { window.NL2Analytics && window.NL2Analytics.flush(); } catch (e) {}
+        setTimeout(() => location.reload(), 400);
       } catch (e) {
         restoring = false; window.__nl2Restoring = false;
         console.warn('[NL2Cloud] restore failed', e);
+        diag('cloud_restore_failed', { reason, error: String((e && e.message) || e).slice(0, 200) });
       } finally { checking = null; }
     })();
     return checking;
