@@ -37,18 +37,24 @@
 	</noscript>
 	<script src="scripts/modernjscheck.js"></script>
 	<script src="scripts/supportcheck.js"></script>
-	<!-- Игра стартует после проверки облачного сохранения (cloudsave.js), но не позже чем через 5 с -->
+	<!-- Игра стартует только после загрузки облачного сохранения (cloudsave.js): иначе можно начать играть
+	     на старой копии. Без сети — сразу; если облако не ответило за 20 с — запускаемся с тем, что есть. -->
+	<div id="nl2Wait" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font:600 18px/1.4 system-ui,sans-serif;color:#fff;background:#709ea9;z-index:10"></div>
 	<script>
 	(function () {
-		var started = false;
+		var started = false, wait = document.getElementById("nl2Wait");
+		var tg = window.Telegram && window.Telegram.WebApp, lang = tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.language_code;
+		if (wait) wait.textContent = lang && lang.indexOf("ru") !== 0 ? "Loading your save…" : "Загрузка сохранения…";
 		function go() {
 			if (started) return; started = true; window.__nl2GameStarted = true;
+			if (wait) wait.remove();
 			["scripts/main.js", "adbridge.js"].forEach(function (src) {
 				var s = document.createElement("script"); s.type = "module"; s.async = false; s.src = src; document.body.appendChild(s);
 			});
 		}
 		var p = window.NL2CloudReady;
-		if (p && p.then) { p.then(go, go); setTimeout(go, 5000); } else go();
+		if (!p || !p.then || navigator.onLine === false) go();
+		else { p.then(go, go); setTimeout(go, 20000); }
 	})();
 	</script>
 
