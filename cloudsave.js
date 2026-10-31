@@ -16,7 +16,7 @@
   const PROJECT_ID = '4bild1ewg3i';
   const DBS = ['c3-localstorage-' + PROJECT_ID, 'c3-savegames-' + PROJECT_ID];
   const STORE = 'keyvaluepairs';
-  const CHUNK = 4000, MAX_CHUNKS = 450, DEBOUNCE_MS = 3000;
+  const CHUNK = 4000, MAX_CHUNKS = 450, PARALLEL = 4, POLL_MS = 15000, DEBOUNCE_MS = 3000;
   const LS_PUSHING = 'nl2_push_started', LS_SYNC = 'nl2_sync_ts', LS_DIRTY = 'nl2_dirty_ts', LS_HASH = 'nl2_sync_hash', LS_GEN = 'nl2_sync_gen';
 
   const tg = window.Telegram && window.Telegram.WebApp;
@@ -252,7 +252,13 @@
       const gen = Math.max(cloudGen, myGen) + 1, slot = cloudSlot === 'a' ? 'b' : 'a';
       const n = Math.ceil(s.length / CHUNK), ts = Date.now();
       const tUp = Date.now(); stage = 'chunks';
-      for (let j = 0; j < n; j++) await cset('nl2_' + slot + j, s.slice(j * CHUNK, (j + 1) * CHUNK));   // по очереди: параллельные запросы Telegram может отклонять
+      const part = (j) => cset('nl2_' + slot + j, s.slice(j * CHUNK, (j + 1) * CHUNK));
+      try {   // по PARALLEL запросов сразу: один запрос к CloudStorage идёт ~0,2–1 с
+        for (let i = 0; i < n; i += PARALLEL) await Promise.all(Array.from({ length: Math.min(PARALLEL, n - i) }, (_, k) => part(i + k)));
+      } catch (e) {   // Telegram отклонил параллельные запросы — повторяем по одному
+        diag('cloud_parallel_failed', { error: String((e && e.message) || e).slice(0, 200) });
+        for (let j = 0; j < n; j++) await part(j);
+      }
       stage = 'meta';
       await cset('nl2_meta', JSON.stringify({ v: 1, gen, slot, ts, n, enc, len: s.length }));
       // лишние части этой ячейки от прошлых выгрузок и части первой версии (nl2_c*)
@@ -296,6 +302,7 @@
     const dirty = atStart ? startDirty : (+lsGet(LS_DIRTY) || 0);
     if (meta.gen && myGen) {
       if (meta.gen <= myGen) return false;
+      if (!atStart && dirty > sync) return false;   // во время игры свои невыгруженные изменения важнее: сначала выгрузим их
       return dirty <= sync || meta.ts > dirty;
     }
     return meta.ts > Math.max(sync, dirty);   // копии без счётчика (первая версия) — по времени
@@ -306,10 +313,10 @@
     checking = (async () => {
       try {
         const raw = await cget('nl2_meta');
-        if (!raw) { log('no cloud copy yet'); diag('cloud_check', { reason, result: 'empty' }); return; }
+        if (!raw) { if (atStart) { log('no cloud copy yet'); diag('cloud_check', { reason, result: 'empty' }); } return; }
         const meta = JSON.parse(raw);
         const take = await decide(meta, atStart);
-        diag('cloud_check', { reason, result: take ? 'restore' : 'keep_local', cloud_gen: meta.gen || 0, cloud_slot: meta.slot || 'c', my_gen: +lsGet(LS_GEN) || 0,
+        if (atStart || take) diag('cloud_check', { reason, result: take ? 'restore' : 'keep_local', cloud_gen: meta.gen || 0, cloud_slot: meta.slot || 'c', my_gen: +lsGet(LS_GEN) || 0,
           cloud_age_s: Math.round((Date.now() - meta.ts) / 1000), local_sync_age_s: Math.round((Date.now() - (atStart ? startSync : +lsGet(LS_SYNC) || 0)) / 1000),
           local_dirty_age_s: Math.round((Date.now() - (atStart ? startDirty : +lsGet(LS_DIRTY) || 0)) / 1000) });
         if (!take) { if (atStart) log('local copy is current'); return; }
@@ -339,6 +346,11 @@
   if (interrupted) { try { localStorage.removeItem(LS_PUSHING); } catch (e) {} setTimeout(() => diag('cloud_push_interrupted', { age_s: Math.round((Date.now() - interrupted) / 1000) }), 0); }
   // index.html ждёт этот промис (не дольше 5 с) и только потом запускает игру: нужная копия загружается сразу.
   window.NL2CloudReady = check('start') || Promise.resolve();
+  // Не успели выгрузить в прошлый раз — выгружаем сразу после старта.
+  window.NL2CloudReady.then(() => { if (!restoring && unsynced()) schedule(2000); });
+  // Пока игра открыта: проверка облака каждые POLL_MS и при возвращении в окно (окно Telegram Desktop не сворачивается).
+  setInterval(() => { if (document.visibilityState === 'visible' && !pushing) check('poll'); }, POLL_MS);
+  window.addEventListener('focus', () => check('focus'));
   // Прогрев: заранее скачиваем (из кэша браузера) нужные JSON-файлы, чтобы выгрузка при закрытии не ждала сети.
   // Через 6 с после старта и при первой записи сохранения, если его ещё не было.
   let warmed = false, warming = false;
