@@ -16,8 +16,8 @@
   const PROJECT_ID = '4bild1ewg3i';
   const DBS = ['c3-localstorage-' + PROJECT_ID, 'c3-savegames-' + PROJECT_ID];
   const STORE = 'keyvaluepairs';
-  const CHUNK = 4000, MAX_CHUNKS = 450, DEBOUNCE_MS = 8000;
-  const LS_SYNC = 'nl2_sync_ts', LS_DIRTY = 'nl2_dirty_ts', LS_HASH = 'nl2_sync_hash', LS_GEN = 'nl2_sync_gen';
+  const CHUNK = 4000, MAX_CHUNKS = 450, DEBOUNCE_MS = 3000;
+  const LS_PUSHING = 'nl2_push_started', LS_SYNC = 'nl2_sync_ts', LS_DIRTY = 'nl2_dirty_ts', LS_HASH = 'nl2_sync_hash', LS_GEN = 'nl2_sync_gen';
 
   const tg = window.Telegram && window.Telegram.WebApp;
   const inTelegram = !!(tg && tg.initData);
@@ -133,13 +133,19 @@
   };
   async function packSave(save, lang) {
     let n = 0;
+    const rank = (f) => (f.includes('_' + lang + '.') ? 0 : /_(RU|EN)\./.test(f) ? 2 : 1);
+    const need = new Set();
+    for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) {
+      const dd = inst.data, c = dd && Array.isArray(dd.size) && PACK_INDEX[dd.size.join('x')];
+      if (c) need.add(c.slice().sort((a, b) => rank(a) - rank(b))[0]);
+    }
+    await Promise.all([...need].map((f) => getFile(f).catch(() => null)));
     for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) {
       const dd = inst.data;
       if (!dd || !Array.isArray(dd.size) || !Array.isArray(dd.data) || Object.keys(dd).length !== 2) continue;
       let cands = PACK_INDEX[dd.size.join('x')];
       if (!cands) continue;
       // сначала файл текущего языка, потом общий, потом другой язык (его скачиваем, только если первый не подошёл)
-      const rank = (f) => (f.includes('_' + lang + '.') ? 0 : /_(RU|EN)\./.test(f) ? 2 : 1);
       cands = cands.slice().sort((a, b) => rank(a) - rank(b));
       const [X, Y] = dd.size, limit = (X * Y) / 4;
       let best = null;
@@ -157,6 +163,9 @@
     return n;
   }
   async function unpackSave(save) {
+    const need = new Set();
+    for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) if (inst.data && inst.data.$nl2f) need.add(inst.data.$nl2f);
+    await Promise.all([...need].map(getFile));   // все файлы сразу, а не по одному
     for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) {
       const p = inst.data;
       if (!p || !p.$nl2f) continue;
@@ -220,6 +229,7 @@
     if (pushing) { again = true; return; }
     pushing = true;
     const t0 = Date.now(); let stage = 'dump';
+    lsSet(LS_PUSHING, t0);
     try {
       const dirtyAtDump = +lsGet(LS_DIRTY) || Date.now();   // записи после этого момента останутся «невыгруженными»
       const raw = { ls: await dumpDb(DBS[0]), sg: await dumpDb(DBS[1]) };
@@ -234,7 +244,7 @@
         ({ enc, s } = await encode({ ls: raw.ls, sg: {} }));
       }
       const h = await hash(s);
-      if (h === lsGet(LS_HASH)) { lsSet(LS_SYNC, dirtyAtDump); return; }
+      if (h === lsGet(LS_HASH)) { lsSet(LS_SYNC, dirtyAtDump); try { localStorage.removeItem(LS_PUSHING); } catch (e) {} return; }
       let cloudGen = 0, cloudSlot = 'c';
       try { const m = JSON.parse((await cget('nl2_meta')) || 'null'); if (m) { cloudGen = m.gen || 0; cloudSlot = m.slot || 'c'; } } catch (e) {}
       const myGen = +lsGet(LS_GEN) || 0;
@@ -249,9 +259,11 @@
       const stale = (await ckeys()).filter((k) => { const m = /^nl2_([abc])(\d+)$/.exec(k); return m && (m[1] === 'c' || (m[1] === slot && +m[2] >= n)); });
       await cdel(stale);
       lsSet(LS_SYNC, dirtyAtDump); lsSet(LS_HASH, h); lsSet(LS_GEN, gen);
+      try { localStorage.removeItem(LS_PUSHING); } catch (e) {}
       log('pushed', reason, 'gen', gen, n, 'chunks', s.length, 'chars');
       diag('cloud_push', { reason, gen, cloud_gen_before: cloudGen, my_gen_before: myGen, chunks: n, ms: Date.now() - t0, upload_ms: Date.now() - tUp });
     } catch (e) {
+      try { localStorage.removeItem(LS_PUSHING); } catch (e2) {}
       console.warn('[NL2Cloud] push failed', e);
       diag('cloud_push_failed', { reason, stage, error: String((e && e.message) || e).slice(0, 200), ms: Date.now() - t0 });
     } finally {
@@ -262,7 +274,7 @@
   function schedule(ms) { clearTimeout(timer); timer = setTimeout(() => push('debounce'), ms); }
 
   window.NL2Cloud = { supported, push: () => push('manual'), readCloud: supported ? readCloud : null };
-  if (!supported) { log('disabled', inTelegram ? '(CloudStorage < 6.9)' : '(not in Telegram)'); return; }
+  if (!supported) { window.NL2CloudReady = Promise.resolve(); log('disabled', inTelegram ? '(CloudStorage < 6.9)' : '(not in Telegram)'); return; }
 
   window.NL2Storage.onWrite(() => { lsSet(LS_DIRTY, Date.now()); schedule(DEBOUNCE_MS); });
 
@@ -310,6 +322,9 @@
         log('restored from cloud', reason, 'gen', meta.gen, new Date(meta.ts).toISOString());
         window.NL2Analytics && window.NL2Analytics.capture('cloud_restore', { reason, cloud_gen: meta.gen || 0, cloud_ts: meta.ts });
         // Игра уже прочитала старые данные — перезапускаем страницу, чтобы она взяла восстановленные.
+        if (atStart && !window.__nl2GameStarted) {   // игра ещё не запущена (ждёт облако) — перезагрузка не нужна
+          restoring = false; window.__nl2Restoring = false; return;
+        }
         try { window.NL2Analytics && window.NL2Analytics.flush(); } catch (e) {}
         setTimeout(() => location.reload(), 400);
       } catch (e) {
@@ -320,7 +335,10 @@
     })();
     return checking;
   }
-  check('start');
+  const interrupted = +lsGet(LS_PUSHING) || 0;
+  if (interrupted) { try { localStorage.removeItem(LS_PUSHING); } catch (e) {} setTimeout(() => diag('cloud_push_interrupted', { age_s: Math.round((Date.now() - interrupted) / 1000) }), 0); }
+  // index.html ждёт этот промис (не дольше 5 с) и только потом запускает игру: нужная копия загружается сразу.
+  window.NL2CloudReady = check('start') || Promise.resolve();
   // Прогрев: заранее скачиваем (из кэша браузера) нужные JSON-файлы, чтобы выгрузка при закрытии не ждала сети.
   // Через 6 с после старта и при первой записи сохранения, если его ещё не было.
   let warmed = false, warming = false;

@@ -37,8 +37,20 @@
 	</noscript>
 	<script src="scripts/modernjscheck.js"></script>
 	<script src="scripts/supportcheck.js"></script>
-	<script src="scripts/main.js" type="module"></script>
-	<script src="adbridge.js" type="module"></script>
+	<!-- Игра стартует после проверки облачного сохранения (cloudsave.js), но не позже чем через 5 с -->
+	<script>
+	(function () {
+		var started = false;
+		function go() {
+			if (started) return; started = true; window.__nl2GameStarted = true;
+			["scripts/main.js", "adbridge.js"].forEach(function (src) {
+				var s = document.createElement("script"); s.type = "module"; s.async = false; s.src = src; document.body.appendChild(s);
+			});
+		}
+		var p = window.NL2CloudReady;
+		if (p && p.then) { p.then(go, go); setTimeout(go, 5000); } else go();
+	})();
+	</script>
 
 
 </body> 
