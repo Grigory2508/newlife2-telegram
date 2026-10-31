@@ -118,6 +118,78 @@
     return Array.from(h.slice(0, 8), (b) => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // ---- сжатие сохранения ---------------------------------------------------------------------
+  // В сохранении Construct лежат целиком все массивы игры (~830 КБ), почти все — копии JSON-файлов сборки
+  // с несколькими изменёнными ячейками. В облако кладём ссылку на файл и список отличий: ~7 частей вместо ~40.
+  const PACK_INDEX = {"401x7x1":["200_years.json"],"23x28x1":["Achievements_EN.json","Achievements_RU.json"],"16x9x1":["Activity_EN.json","Activity_RU.json","Sport_EN.json","Sport_RU.json"],"33x6x1":["AdoptedMembers_EN.json","AdoptedMembers_RU.json"],"994x4x1":["AllText_New_EN.json","AllText_New_RU.json"],"191x12x1":["Buisness_EN.json","Buisness_RU.json"],"25x4x1":["ButtonsText_EN.json","ButtonsText_RU.json"],"11x7x1":["Clothes_EN.json","Clothes_RU.json","GameType.json","GameType_EN.json"],"12x14x1":["CoffeeOrSleep.json"],"134x73x1":["ComplexEvents_EN.json","ComplexEvents_RU.json"],"16x10x1":["Credits.json"],"50x16x1":["Diseases_EN.json","Diseases_RU.json"],"15x3x1":["Distribution_EN.json","Distribution_RU.json"],"68x8x1":["Divorce_EN.json","Divorce_RU.json"],"30x10x1":["Events_EN.json","Events_RU.json"],"200x25x1":["Family_EN.json","Family_RU.json"],"7x7x1":["Food_EN.json","Food_RU.json"],"27x4x1":["ForTravel.json","ForTravels_EN.json"],"12x10x1":["FreeTime_EN.json","FreeTime_RU.json"],"59x15x1":["Freelance_EN.json","Freelance_RU.json"],"28x9x1":["Gifts_EN.json","Gifts_RU.json","Packs_EN.json","Packs_RU.json"],"50x12x1":["Hobbies_SelfDevelop_EN.json","Hobbies_SelfDevelop_RU.json"],"22x24x1":["HomeList.json"],"12x23x1":["Home_EN.json","Home_RU.json"],"202x10x1":["Houses.json"],"82x10x1":["Human_EN.json","Human_RU.json"],"259x19x1":["Inventory_New.json"],"7x20x1":["Invest_EN.json","Invest_RU.json"],"24x4x1":["ItemEffectText_EN.json","ItemEffectText_RU.json"],"362x10x1":["Job_EN.json","Job_RU.json"],"702x7x1":["Kladbishe.json"],"12x7x1":["KladbishePlaces_EN.json","KladbishePlaces_RU.json","SpecialActions_EN.json","SpecialActions_RU.json"],"52x7x1":["Levels_RU.json"],"959x1x1":["Localize_EN.json","Localize_RU.json"],"17x12x1":["Managers.json"],"48x8x1":["Mogily_EN.json","Mogily_RU.json"],"13x3x1":["NMPrice_EN.json","NMPrice_RU.json"],"606x5x1":["Names_EN.json","Names_RU.json"],"13x11x1":["NotMobList_RU.json"],"22x14x1":["NotMob_EN.json","NotMob_RU.json"],"202x18x1":["NotRandomAction_RU.json","NotRandomEvents_RU.json","NotRandom_Actions_EN.json","NotRandom_Events_EN.json"],"302x17x1":["OtherPeoples.json"],"302x20x1":["People.json"],"211x7x1":["Pets_EN.json","Pets_RU.json"],"32x10x1":["RandomDeath_EN.json","RandomDeath_RU.json"],"66x4x1":["Results_EN.json","Results_RU.json"],"13x2x1":["Rooms_EN.json","Rooms_RU.json"],"302x4x1":["SexList.json"],"39x4x1":["Skills_EN.json","Skills_RU.json"],"39x8x1":["SocActions_EN.json","SocActions_RU.json"],"67x19x1":["SpecialShopNew_RU.json","SpecialShop_New_EN.json"],"48x10x1":["SpecialShop_EN.json","SpecialShop_RU.json"],"41x7x1":["Statistica_EN.json","Statistica_RU.json"],"34x5x1":["TeamCredits_EN.json","TeamCredits_RU.json"],"201x8x1":["TextContent_EN.json","TextContent_RU.json"],"32x4x1":["Transport_EN.json","Transport_RU.json"],"1801x17x1":["TravelActions_New_EN.json","TravelActions_New_RU.json"],"49x12x1":["TravelPoints_EN.json","TravelPoints_RU.json"],"12x11x1":["Travel_ADSPacks.json"],"32x8x1":["Vacations.json"]};   // размер массива -> файлы сборки такого размера
+  const fileCache = {};
+  const getFile = (name) => (fileCache[name] = fileCache[name] ||
+    fetch(name).then((r) => { if (!r.ok) throw new Error('fetch ' + name + ' ' + r.status); return r.json(); }).then((j) => j.data));
+  const cellEq = (a, b) => {
+    if (a === b) return true;
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  };
+  async function packSave(save, lang) {
+    let n = 0;
+    for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) {
+      const dd = inst.data;
+      if (!dd || !Array.isArray(dd.size) || !Array.isArray(dd.data) || Object.keys(dd).length !== 2) continue;
+      let cands = PACK_INDEX[dd.size.join('x')];
+      if (!cands) continue;
+      // сначала файл текущего языка, потом общий, потом другой язык (его скачиваем, только если первый не подошёл)
+      const rank = (f) => (f.includes('_' + lang + '.') ? 0 : /_(RU|EN)\./.test(f) ? 2 : 1);
+      cands = cands.slice().sort((a, b) => rank(a) - rank(b));
+      const [X, Y] = dd.size, limit = (X * Y) / 4;
+      let best = null;
+      for (const f of cands) {
+        let fd; try { fd = await getFile(f); } catch (e) { continue; }
+        const d = []; let ok = fd.length === X;
+        for (let x = 0; x < X && ok; x++) for (let y = 0; y < Y && ok; y++) {
+          if (!cellEq(dd.data[x][y], fd[x][y])) { d.push([x, y, dd.data[x][y]]); if (d.length > limit) ok = false; }
+        }
+        if (ok && (!best || d.length < best.d.length)) best = { $nl2f: f, s: dd.size, d };
+        if (best && best.d.length <= (X * Y) / 20) break;
+      }
+      if (best) { inst.data = best; n++; }
+    }
+    return n;
+  }
+  async function unpackSave(save) {
+    for (const t of Object.values(save.types || {})) for (const inst of t.instances || []) {
+      const p = inst.data;
+      if (!p || !p.$nl2f) continue;
+      const fd = await getFile(p.$nl2f);
+      const data = fd.map((row) => row.map((c) => (Array.isArray(c) ? c.slice() : c)));
+      for (const [x, y, v] of p.d) data[x][y] = v;
+      inst.data = { size: p.s, data };
+    }
+    return save;
+  }
+  // sg (база сохранений) -> sgp: сохранения Construct сжаты, остальное как есть
+  async function packSg(sg, lang) {
+    const out = {};
+    for (const [k, v] of Object.entries(sg)) {
+      try {
+        const obj = typeof v === 'string' ? JSON.parse(v) : v;
+        if (obj && obj.c3save && obj.types) { await packSave(obj, lang); out[k] = { p: obj, str: typeof v === 'string' }; continue; }
+      } catch (e) {}
+      out[k] = { r: v };
+    }
+    return out;
+  }
+  async function unpackSg(sgp) {
+    const out = {};
+    for (const [k, e] of Object.entries(sgp)) {
+      if ('r' in e) { out[k] = e.r; continue; }
+      const obj = await unpackSave(e.p);
+      out[k] = e.str ? JSON.stringify(obj) : obj;
+    }
+    return out;
+  }
+  window.__nl2Pack = { packSg, unpackSg };   // для тестов
+
   // ---- CloudStorage (колбэки -> промисы) ------------------------------------------------
   const cget = (k) => new Promise((ok, no) => cs.getItem(k, (e, v) => (e ? no(e) : ok(v))));
   const cgetMany = (ks) => new Promise((ok, no) => cs.getItems(ks, (e, v) => (e ? no(e) : ok(v))));
@@ -150,11 +222,16 @@
     const t0 = Date.now(); let stage = 'dump';
     try {
       const dirtyAtDump = +lsGet(LS_DIRTY) || Date.now();   // записи после этого момента останутся «невыгруженными»
-      const data = { ls: await dumpDb(DBS[0]), sg: await dumpDb(DBS[1]) };
+      const raw = { ls: await dumpDb(DBS[0]), sg: await dumpDb(DBS[1]) };
+      stage = 'pack';
+      let data;
+      const lang = +raw.ls.Language === 1 ? 'EN' : 'RU';
+      try { data = { ls: raw.ls, sgp: await packSg(raw.sg, lang) }; } catch (e) { console.warn('[NL2Cloud] pack failed', e); data = raw; }
+      stage = 'encode';
       let { enc, s } = await encode(data);
       if (Math.ceil(s.length / CHUNK) > MAX_CHUNKS) {   // не влезает — сохраняем только мета-прогресс
         log('save too big for CloudStorage, keeping progress only', s.length);
-        ({ enc, s } = await encode({ ls: data.ls, sg: {} }));
+        ({ enc, s } = await encode({ ls: raw.ls, sg: {} }));
       }
       const h = await hash(s);
       if (h === lsGet(LS_HASH)) { lsSet(LS_SYNC, dirtyAtDump); return; }
@@ -225,9 +302,10 @@
           local_dirty_age_s: Math.round((Date.now() - (atStart ? startDirty : +lsGet(LS_DIRTY) || 0)) / 1000) });
         if (!take) { if (atStart) log('local copy is current'); return; }
         const { data } = await readCloud();
+        const sg = data.sgp ? await unpackSg(data.sgp) : data.sg;   // sgp — сжатая копия (нужны JSON-файлы сборки); до записи в базы
         restoring = true; window.__nl2Restoring = true; clearTimeout(timer); timer = null;
         await loadDb(DBS[0], data.ls || {});
-        if (data.sg && Object.keys(data.sg).length) await loadDb(DBS[1], data.sg);
+        if (sg && Object.keys(sg).length) await loadDb(DBS[1], sg);
         lsSet(LS_SYNC, meta.ts); lsSet(LS_DIRTY, meta.ts); lsSet(LS_HASH, ''); lsSet(LS_GEN, meta.gen || 0);
         log('restored from cloud', reason, 'gen', meta.gen, new Date(meta.ts).toISOString());
         window.NL2Analytics && window.NL2Analytics.capture('cloud_restore', { reason, cloud_gen: meta.gen || 0, cloud_ts: meta.ts });
@@ -243,4 +321,20 @@
     return checking;
   }
   check('start');
+  // Прогрев: заранее скачиваем (из кэша браузера) нужные JSON-файлы, чтобы выгрузка при закрытии не ждала сети.
+  // Через 6 с после старта и при первой записи сохранения, если его ещё не было.
+  let warmed = false, warming = false;
+  async function warm() {
+    if (warmed || warming || restoring) return;
+    warming = true;
+    try {
+      if (checking) await checking;
+      const ls = await dumpDb(DBS[0]), sg = await dumpDb(DBS[1]);
+      if (!Object.keys(sg).length) return;
+      const t = Date.now(); await packSg(sg, +ls.Language === 1 ? 'EN' : 'RU');
+      warmed = true; log('pack cache warm', Date.now() - t, 'ms');
+    } catch (e) {} finally { warming = false; }
+  }
+  setTimeout(warm, 6000);
+  window.NL2Storage.onWrite((db) => { if (!warmed && db === DBS[1]) setTimeout(warm, 1000); });
 })();
